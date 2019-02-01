@@ -19,7 +19,7 @@ def _cmd(cmd_list, stdin=None, cmd_input=None, err_msg="Command Line Error"):
     if proc.returncode != 0: raise IOError("{0}\n{1}".format(err_msg, err))
     return out
 
-def get_crt(account_key, csr, acme_dir, log=LOGGER, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None):
+def get_crt(sign, pk, csr, acme_dir, log=LOGGER, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None):
     directory, acct_headers, alg, jwk = None, None, None, None # global variables
 
     # helper functions - base64 encode for jose spec
@@ -50,8 +50,7 @@ def get_crt(account_key, csr, acme_dir, log=LOGGER, disable_check=False, directo
         protected = {"url": url, "alg": alg, "nonce": new_nonce}
         protected.update({"jwk": jwk} if acct_headers is None else {"kid": acct_headers['Location']})
         protected64 = _b64(json.dumps(protected).encode('utf8'))
-        protected_input = "{0}.{1}".format(protected64, payload64).encode('utf8')
-        out = _cmd(["openssl", "dgst", "-sha256", "-sign", account_key], stdin=subprocess.PIPE, cmd_input=protected_input, err_msg="OpenSSL Error")
+        out = sign("{0}.{1}".format(protected64, payload64).encode('utf8'))
         data = json.dumps({"protected": protected64, "payload": payload64, "signature": _b64(out)})
         try:
             return _do_request(url, data=data.encode('utf8'), err_msg=err_msg, depth=depth)
@@ -68,13 +67,7 @@ def get_crt(account_key, csr, acme_dir, log=LOGGER, disable_check=False, directo
             return result
 
     # parse account key to get public key
-    log.info("Parsing account key...")
-    out = _cmd(["openssl", "rsa", "-in", account_key, "-noout", "-text"], err_msg="OpenSSL Error")
-    pub_pattern = r"[Mm]odulus:\n\s+00:([a-f0-9\:\s]+?)\n(?:public)Exponent: ([0-9]+)"
-    pub_hex, pub_exp = re.search(pub_pattern, out.decode('utf8'), re.MULTILINE|re.DOTALL).groups()
-    pub_exp = "{0:x}".format(int(pub_exp))
-    pub_exp = "0{0}".format(pub_exp) if len(pub_exp) % 2 else pub_exp
-    alg = "RS256"
+    alg, pub_exp, pub_hex = pk()
     jwk = {
         "e": _b64(binascii.unhexlify(pub_exp.encode("utf-8"))),
         "kty": "RSA",
@@ -186,7 +179,17 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     LOGGER.setLevel(args.quiet or LOGGER.level)
-    signed_crt = get_crt(args.account_key, args.csr, args.acme_dir, log=LOGGER, disable_check=args.disable_check, directory_url=args.directory_url, contact=args.contact)
+
+    LOGGER.info("Parsing account key...")
+    keyinfoout = _cmd(["openssl", "rsa", "-in", args.account_key, "-noout", "-text"], err_msg="OpenSSL Error")
+    def sign(msg): return _cmd(["openssl", "dgst", "-sha256", "-sign", account_key], stdin=subprocess.PIPE, cmd_input=msg, err_msg="OpenSSL Error")
+
+    pub_hex, pub_exp = re.search(r"[Mm]odulus:\n\s+00:([a-f0-9\:\s]+?)\n(?:public|)Exponent: ([0-9]+)", keyinfoout.decode('utf8'), re.MULTILINE|re.DOTALL).groups()
+    pub_exp = "{0:x}".format(int(pub_exp))
+    pub_exp = "0{0}".format(pub_exp) if len(pub_exp) % 2 else pub_exp
+    def pk() : return "RS256", pub_exp, pub_hex
+
+    signed_crt = get_crt(sign, pk, args.csr, args.acme_dir, log=LOGGER, disable_check=args.disable_check, directory_url=args.directory_url, contact=args.contact)
     sys.stdout.write(signed_crt)
 
 if __name__ == "__main__": # pragma: no cover
