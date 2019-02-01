@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # Copyright Daniel Roesler, under MIT license, see LICENSE at github.com/diafygi/acme-tiny
-import argparse, subprocess, json, os, sys, base64, binascii, time, hashlib, re, copy, textwrap, logging
+import argparse, subprocess, json, os, sys, base64, binascii, time, hashlib, re, copy, textwrap, logging, shlex
 try:
     from urllib.request import urlopen, Request # Python 3
 except ImportError:
@@ -169,20 +169,28 @@ def main(argv=None):
             0 0 1 * * python /path/to/acme_tiny.py --account-key /path/to/account.key --csr /path/to/domain.csr --acme-dir /usr/share/nginx/html/.well-known/acme-challenge/ > /path/to/signed_chain.crt 2>> /var/log/acme_tiny.log
             """)
     )
-    parser.add_argument("--account-key", required=True, help="path to your Let's Encrypt account private key")
+    parser.add_argument("--account-key", required=False, help="path to your Let's Encrypt account private key")
     parser.add_argument("--csr", required=True, help="path to your certificate signing request")
     parser.add_argument("--acme-dir", required=True, help="path to the .well-known/acme-challenge/ directory")
     parser.add_argument("--quiet", action="store_const", const=logging.ERROR, help="suppress output except for errors")
     parser.add_argument("--disable-check", default=False, action="store_true", help="disable checking if the challenge file is hosted correctly before telling the CA")
     parser.add_argument("--directory-url", default=DEFAULT_DIRECTORY_URL, help="certificate authority directory url, default is Let's Encrypt")
     parser.add_argument("--contact", metavar="CONTACT", default=None, nargs="*", help="Contact details (e.g. mailto:aaa@bbb.com) for your account-key")
+    parser.add_argument("--public-key", required=False, help="Specify account public key instead")
+    parser.add_argument("--sign-cmd", required=False, help="Specify command for generating signatures")
 
     args = parser.parse_args(argv)
     LOGGER.setLevel(args.quiet or LOGGER.level)
 
     LOGGER.info("Parsing account key...")
-    keyinfoout = _cmd(["openssl", "rsa", "-in", args.account_key, "-noout", "-text"], err_msg="OpenSSL Error")
-    def sign(msg): return _cmd(["openssl", "dgst", "-sha256", "-sign", account_key], stdin=subprocess.PIPE, cmd_input=msg, err_msg="OpenSSL Error")
+    if args.account_key is not None:
+      keyinfoout = _cmd(["openssl", "rsa", "-in", args.account_key, "-noout", "-text"], err_msg="OpenSSL Error")
+      def sign(msg): return _cmd(["openssl", "dgst", "-sha256", "-sign", account_key], stdin=subprocess.PIPE, cmd_input=msg, err_msg="OpenSSL Error")
+    elif args.public_key is not None and args.sign_cmd is not None:
+      keyinfoout = _cmd(["openssl", "rsa", "-in", args.public_key, "-noout", "-text", "-pubin"], err_msg="OpenSSL Error")
+      def sign(msg): return _cmd(shlex.split(args.sign_cmd), stdin=subprocess.PIPE, cmd_input=msg, err_msg="Sign command error")
+    else:
+      sys.stderr.write("Please specify either --account-key or both --public-key and --sign-cmd\n")
 
     pub_hex, pub_exp = re.search(r"[Mm]odulus:\n\s+00:([a-f0-9\:\s]+?)\n(?:public|)Exponent: ([0-9]+)", keyinfoout.decode('utf8'), re.MULTILINE|re.DOTALL).groups()
     pub_exp = "{0:x}".format(int(pub_exp))

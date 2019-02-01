@@ -1,0 +1,163 @@
+# Hardware Security Module usage with acme-tiny
+
+## What?
+
+ACME requires the use of a long-lived account key.  Storing this key on your local
+system opens it to copying by other processes (and users) of the machine.  An
+alternative is to store it in a hardware security token which will not disclose the
+key, but will still enable signing operations with it.  acme-tiny can offload its
+signing needs to a shell-script; we use this facility to interact with our HSM.
+
+For the examples in this document, we will be using a Yubico Yubikey 4 for our HSM,
+but the instructions should be readily generalized to other devices.
+
+## Initialization
+
+### Setup with a CPU-generated key
+
+One may wish to generate the account key on a trusted (offline!) system and store it
+for safe-keeping.
+
+In order that our keys will be seen as capable of *signing*, we will need to set some `keyUsage`
+bits in the certificate.  We create a minimal `openssl.conf` file, containing the following
+stanza:
+
+```
+[ req ]
+distinguished_name                      = req_distinguished_name
+x509_extensions                         = v3_ca
+
+[ req_distinguished_name ]
+commonName                              = Common Name
+commonName_max                          = 64
+
+[ v3_ca ]
+basicConstraints                        = CA:FALSE
+keyUsage                                = digitalSignature
+```
+
+Note that these bits are not interpreted by any part of the system *other than
+the HSM*; the ACME protocol (tellingly) does not use X.509 certificates for
+account management.
+
+Now, generate your account key and the corresponding certificate and extract the
+public key components:
+
+```bash
+openssl genrsa 2048 > ./account.key
+openssl req -new -sha256 -key ./account.key -subj "/CN=acme" -x509 -config ./openssl.conf -out ./account.crt
+openssl x509 -in ./account.crt -pubkey -noout > ./account.pub
+```
+
+Keep `account.key` secret.  Keep it safe.  ("So safe you wouldn't believe it.")
+
+Import these into your HSM.  For a Yubikey, that amounts to something like this
+pair of commands.  You are free to vary the slot (`-s`) used; if slot `9e` is
+available, it is somewhat attractive as it does not need the card PIN fed in.
+(If you have changed your management key, add it to the command line or you
+will be prompted for it when necessary.)
+
+```
+yubico-piv-tool -s 82 -i ./account.key -a import-key --touch-policy=never --pin-policy=never
+yubico-piv-tool -s 82 -i ./account.crt -a import-certificate --touch-policy=never --pin-policy=never
+```
+
+Before proceeding, ensure that the key has been successfully imported.  Running
+`pkcs15-tool -k` should show something like the following.  (Note that if you have
+multiple keys on the card, the Yubico slot name is shown as the `Key ref`.)
+
+```
+Using reader with a card: Yubico Yubikey 4 OTP+U2F+CCID 00 00
+Private RSA Key [Retired KEY MAN 1]
+        Object Flags   : [0x1], private
+        Usage          : [0x22E], decrypt, sign, signRecover, unwrap, nonRepudiation
+        Access Flags   : [0x1D], sensitive, alwaysSensitive, neverExtract, local
+        ModLength      : 2048
+        Key ref        : 130 (0x82)
+        Native         : yes
+        Auth ID        : 01
+        ID             : 05
+```
+
+If the `Usage` line does not show `sign`, then something has gone wrong.  The
+`accout.crt` file has served its purpose and can be discarded at this point.  We
+are now ready to compose the shell script that will carry out our signing operations,
+and thereafter will be ready to use acme-tiny without full access to our private key
+bits.  Skip down to "Common Setup: Shell Script"
+
+### Setup with a HSM-generated key
+
+HSMs can generate keys and thereby never expose the secret material outside the
+device (good) but possibly without the opportunity for key recovery if the HSM
+breaks (bad).  It's a trade-off: from the HSM's perspective, "backup" and "leak
+of secret keys to an adversary" are much the same thing.  In any case, one may
+wish to do so.
+
+We begin by generating `account.key` on the device itself, and extracting the public
+component, `account.pub`.  (You are, as above, free to vary the slot, `-s`, used;
+`9e` is attractive for not needing the PIN to generate signatures.)
+
+```
+yubico-piv-tool -s 9e -A RSA2048 -a generate -o ./account.pub
+yubico-piv-tool -s 9e -S '/CN=acme' -i ./account.pub -a selfsign -o ./account.crt
+yubico-piv-tool -s 9e -i ./account.crt -a import-certificate
+```
+
+At this point, `pkcs15-tool -k` should show:
+
+```
+Using reader with a card: Yubico Yubikey 4 OTP+U2F+CCID 00 00
+Private RSA Key [CARD AUTH key]
+        Object Flags   : [0x0]
+        Usage          : [0xC], sign, signRecover
+        Access Flags   : [0x1D], sensitive, alwaysSensitive, neverExtract, local
+        ModLength      : 2048
+        Key ref        : 158 (0x9E)
+        Native         : yes
+        ID             : 04
+```
+
+If you do not have a key with `Usage` including `sign`, something has gone
+wrong.  On Yubikey devices, the slots' usage flags matter in ways they do not
+when importing one's own key.  Yubico has set key `9e` to always have
+signatures enabled without requiring the end-user PIN.  (Slots `9a` and `9c`
+are, additionally, viable.  It is not, easily, possible to use key slots
+`82`-`95` or `9d` with this mechanism, as OpenSC interprets those slots by
+using the key usage flags on the certificate as well as permissions intrinsic
+on the slots, and Yubico's PIV tool only generates certificates which get
+interpreted as having decryption and unwrapping support, not signing support,
+and these slots have no intrinsic support for signing.  A "real" HSM would not
+have such characteristics.)
+
+In any case, now that we have our suitable key in the device, we now wire up
+acme-tiny to this key.
+
+### Common Setup: Shell Script
+
+Write the following to a file `sign-card.sh`:
+
+```
+#!/bin/sh
+openssl dgst -sha256 -binary | pkcs15-crypt -R -f openssl --sign -k 04 -p 123456 --sha-256 --pkcs1
+```
+
+Change `-k 04` to reflect the `ID` reported by `pkcs15-tool` above.  If you
+have a PIN set on your HSM, change `-p 123456` in light of the PIN.  (Yubikey
+users can remove the `-p ...` option if they are using slot `9e` for their
+account key.)
+
+Set the file executable with `chmod +x ./sign-card.sh`.
+
+## ACME
+
+One can invoke acme-tiny using the `account.pub` and `sign-card.sh` files created above.
+Having gotten `domain.csr` using the normal mechanisms detailed elsewhere, run, specifying
+your `${ACME_DIR}` appropriately,
+
+```
+acme_tiny.py --csr ./domain.csr --acme-dir ${ACME_DIR} \
+	--public-key ./account.pub --sign-cmd ./sign-card.sh > domain.csr
+```
+
+Everything should be grand!  Feel free to automate this via cron in the usual way,
+too.
