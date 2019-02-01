@@ -13,20 +13,18 @@ LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.StreamHandler())
 LOGGER.setLevel(logging.INFO)
 
+# helper function - run external commands
+def _cmd(cmd_list, stdin=None, cmd_input=None, err_msg="Command Line Error"):
+    proc = subprocess.Popen(cmd_list, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate(cmd_input)
+    if proc.returncode != 0: raise IOError("{0}\n{1}".format(err_msg, err))
+    return out
+
 def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None):
     directory, acct_headers, alg, jwk = None, None, None, None # global variables
 
     # helper functions - base64 encode for jose spec
-    def _b64(b):
-        return base64.urlsafe_b64encode(b).decode('utf8').replace("=", "")
-
-    # helper function - run external commands
-    def _cmd(cmd_list, stdin=None, cmd_input=None, err_msg="Command Line Error"):
-        proc = subprocess.Popen(cmd_list, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = proc.communicate(cmd_input)
-        if proc.returncode != 0:
-            raise IOError("{0}\n{1}".format(err_msg, err))
-        return out
+    def _b64(b): return base64.urlsafe_b64encode(b).decode('utf8').replace("=", "")
 
     # helper function - make request and automatically parse json response
     def _do_request(url, data=None, err_msg="Error", depth=0):
