@@ -10,7 +10,6 @@ DEFAULT_DIRECTORY_URL = "https://acme-v02.api.letsencrypt.org/directory"
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.StreamHandler())
-LOGGER.setLevel(logging.INFO)
 
 # helper function - run external commands
 def _cmd(cmd_list, stdin=None, cmd_input=None, err_msg="Command Line Error"):
@@ -52,8 +51,7 @@ def get_crt(sign, pk, csr, acme_dir, log=LOGGER, disable_check=False, directory_
         protected64 = _b64(json.dumps(protected).encode('utf8'))
         out = sign("{0}.{1}".format(protected64, payload64).encode('utf8'))
         data = json.dumps({"protected": protected64, "payload": payload64, "signature": _b64(out)})
-        try:
-            return _do_request(url, data=data.encode('utf8'), err_msg=err_msg, depth=depth)
+        try: return _do_request(url, data=data.encode('utf8'), err_msg=err_msg, depth=depth)
         except IndexError: # retry bad nonces (they raise IndexError)
             return _send_signed_request(url, payload, err_msg, depth=(depth + 1))
 
@@ -61,9 +59,7 @@ def get_crt(sign, pk, csr, acme_dir, log=LOGGER, disable_check=False, directory_
     def _poll_until_not(url, pending_statuses, err_msg):
         while True:
             result, _, _ = _do_request(url, err_msg=err_msg)
-            if result['status'] in pending_statuses:
-                time.sleep(2)
-                continue
+            if result['status'] in pending_statuses: time.sleep(2); continue
             return result
 
     # parse account key to get public key
@@ -81,13 +77,11 @@ def get_crt(sign, pk, csr, acme_dir, log=LOGGER, disable_check=False, directory_
     out = _cmd(["openssl", "req", "-in", csr, "-noout", "-text"], err_msg="Error loading {0}".format(csr))
     domains = set([])
     common_name = re.search(r"Subject:.*? CN\s?=\s?([^\s,;/]+)", out.decode('utf8'))
-    if common_name is not None:
-        domains.add(common_name.group(1))
+    if common_name is not None: domains.add(common_name.group(1))
     subject_alt_names = re.search(r"X509v3 Subject Alternative Name: \n +([^\n]+)\n", out.decode('utf8'), re.MULTILINE|re.DOTALL)
     if subject_alt_names is not None:
         for san in subject_alt_names.group(1).split(", "):
-            if san.startswith("DNS:"):
-                domains.add(san[4:])
+            if san.startswith("DNS:"): domains.add(san[4:])
     log.info("Found domains: {0}".format(", ".join(domains)))
 
     # get the ACME directory of urls
@@ -180,7 +174,7 @@ def main(argv=None):
     parser.add_argument("--sign-cmd", required=False, help="Specify command for generating signatures")
 
     args = parser.parse_args(argv)
-    LOGGER.setLevel(args.quiet or LOGGER.level)
+    LOGGER.setLevel(args.quiet or logging.INFO)
 
     LOGGER.info("Parsing account key...")
     if args.account_key is not None:
